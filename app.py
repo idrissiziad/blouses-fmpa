@@ -8,8 +8,8 @@ from datetime import datetime
 # ================= CONFIGURATION & SECRETS =================
 DATABASE_URL = st.secrets.get("DATABASE_URL", "")
 SECRET_SALT = st.secrets.get("SECRET_SALT", "CLE_SECRET_SECURITE_TABLIERS_MAROC")
-OPERATOR_PASSWORD = st.secrets.get("OPERATOR_PASSWORD", "BDE_STAFF_2026")
-PRESIDENT_PASSWORD = st.secrets.get("PRESIDENT_PASSWORD", "PRESIDENT_ADMIN_2026")
+OPERATOR_PASSWORD = st.secrets.get("OPERATOR_PASSWORD", "")
+PRESIDENT_PASSWORD = st.secrets.get("PRESIDENT_PASSWORD", "")
 # ===========================================================
 
 st.set_page_config(page_title="Gestion Tabliers & Mesures", page_icon="🥼", layout="wide")
