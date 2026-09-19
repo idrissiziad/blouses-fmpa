@@ -88,6 +88,7 @@ with st.sidebar:
         
     if st.button("Se déconnecter"):
         st.session_state["user_role"] = None
+        st.session_state.pop("verified_ticket", None)
         st.rerun()
 
 # --- APPLICATION ---
@@ -95,7 +96,7 @@ st.title("🥼 Gestion, Mesures Tailleur & Distribution")
 
 onglet1, onglet2, onglet3 = st.tabs([
     "📝 1. Enregistrement (Salle 1 & 2)", 
-    "🔍 2. Vérification & Remise (Anti-fraude)", 
+    "🔍 2. Vérification & Prise de Mesures / Remise", 
     "📊 3. Tableau Registre (Conforme Excel)"
 ])
 
@@ -106,7 +107,10 @@ with onglet1:
     col_gauche, col_droite = st.columns(2)
     
     with col_gauche:
-        mode = st.radio("Circuit :", ["Salle 1 : Taille Standard (Express)", "Salle 2 : Prise de Mesure Tailleur (Sur-mesure)"])
+        mode = st.radio("Circuit :", [
+            "Salle 1 : Taille Standard (Express - Remise Immédiate)", 
+            "Salle 2 : Sur-Mesure Tailleur (Mesures prises en Salle 2)"
+        ])
         nom_prenom = st.text_input("Nom et Prénom :").strip().title()
         
         c_p1, c_p2 = st.columns(2)
@@ -126,24 +130,18 @@ with onglet1:
             epaules, manche, poitrine, longueur = "", "", "", ""
             type_cmd = "Standard"
             detail_cle = taille_standard
+            st.success("⚡ **Remise immédiate :** Ce tablier sera automatiquement marqué comme **Confirmé / Remis**.")
         else:
-            st.markdown("#### 📏 Mesures Tailleur (en cm)")
+            st.markdown("#### 📏 Prise de Mesure Tailleur (Salle 2)")
+            st.info("ℹ️ Les mesures tailleur (épaules, manche, poitrine, longueur) seront saisies dans l'**Onglet 2** une fois le ticket et code de sécurité scannés/vérifiés par le tailleur.")
             type_cmd = "Sur-mesure"
             taille_standard = "SUR-MESURE"
-            c_m1, c_m2 = st.columns(2)
-            with c_m1:
-                epaules = st.text_input("Largeur des épaules (cm) :").strip()
-                poitrine = st.text_input("Tour de Poitrine (cm) :").strip()
-            with c_m2:
-                manche = st.text_input("Longueur Manche (cm) :").strip()
-                longueur = st.text_input("Longueur totale (cm) :").strip()
-            detail_cle = f"{epaules}-{manche}-{poitrine}-{longueur}"
+            epaules, manche, poitrine, longueur = "", "", "", ""
+            detail_cle = "SUR-MESURE"
 
     if st.button("Enregistrer et Générer le Reçu", type="primary"):
         if not nom_prenom:
             st.warning("Veuillez renseigner le Nom et Prénom.")
-        elif type_cmd == "Sur-mesure" and not (epaules and manche and poitrine and longueur):
-            st.warning("Veuillez renseigner toutes les mesures du tailleur.")
         else:
             conn = get_connection()
             c = conn.cursor()
@@ -155,93 +153,141 @@ with onglet1:
             code_secu = generate_code(ticket_id, nom_prenom, detail_cle)
             date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
+            # Salle 1 : Confirmation automatique immédiate
+            if type_cmd == "Standard":
+                statut_init = "Confirmé"
+                date_remise_init = date_now
+            else:
+                statut_init = "Non Confirmé"
+                date_remise_init = "En attente mesures"
+            
             c.execute('''
                 INSERT INTO tabliers VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (ticket_id, date_now, nom_prenom, type_cmd, taille_standard, epaules, manche, poitrine, longueur, paiement, reste, code_secu, "Non Confirmé", "En attente"))
+            ''', (ticket_id, date_now, nom_prenom, type_cmd, taille_standard, epaules, manche, poitrine, longueur, paiement, reste, code_secu, statut_init, date_remise_init))
             conn.commit()
             c.close()
             conn.close()
             
-            st.success(f"Commande validée pour {nom_prenom} !")
+            if type_cmd == "Standard":
+                st.success(f" Tablier remis et commande validée automatiquement pour {nom_prenom} !")
+            else:
+                st.success(f" Ticket généré pour {nom_prenom} ! L'étudiant peut se présenter au tailleur.")
+
             st.markdown(f"""
             ---
-            ### 🧾 INFORMATIONS À ÉCRIRE SUR LE REÇU PAPIER :
+            ### 🧾 INFORMATIONS DU REÇU PAPIER :
             - **N° Ticket :** `{ticket_id}`
             - **Nom :** `{nom_prenom}`
-            - **Taille / Type :** `{"Standard (" + taille_standard + ")" if type_cmd == "Standard" else "Sur-mesure"}`
+            - **Circuit :** `{"Salle 1 - Standard (" + taille_standard + ")" if type_cmd == "Standard" else "Salle 2 - Sur-Mesure"}`
             - **Reste à payer :** `{reste} DH`
             - **Code de Sécurité Anti-fraude :** `{code_secu}`
+            - **Statut :** `{statut_init}`
             ---
             """)
 
-# ================= ONGLET 2 : VÉRIFICATION & REMISE =================
+# ================= ONGLET 2 : VÉRIFICATION & PRISE DE MESURES =================
 with onglet2:
-    st.subheader("Distribution du Tablier (Contrôle Reçu Papier)")
+    st.subheader("Distribution & Saisie Mesures Tailleur")
     
-    v1, v2 = st.columns(2)
-    with v1:
-        s_id = st.text_input("N° Ticket inscrit sur le papier (ex: S1-005 ou S2-002) :").strip().upper()
-    with v2:
-        s_code = st.text_input("Code Sécurité inscrit (ex: 8F2A-4B9C) :").strip().upper()
-        
-    if st.button("Vérifier le Ticket", type="secondary"):
-        if not s_id or not s_code:
-            st.warning("Veuillez entrer le numéro de ticket ET le code.")
-        else:
-            conn = get_connection()
-            c = conn.cursor()
-            c.execute("SELECT * FROM tabliers WHERE ticket_id = %s", (s_id,))
-            row = c.fetchone()
-            c.close()
-            conn.close()
-            
-            if not row:
-                st.error("❌ Ticket inconnu dans la base de données !")
-            else:
-                (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r) = row
-                
-                info_cle = t_taille if t_type == "Standard" else f"{t_ep}-{t_ma}-{t_po}-{t_lo}"
-                
-                if not verify_code(t_id, t_nom, info_cle, s_code):
-                    st.error("🚨 ALERTE FALSIFICATION : Le code ne correspond pas à ce ticket ou le nom/la taille a été falsifié !")
-                else:
-                    if t_statut == "Confirmé":
-                        st.error(f"""
-                        ⛔ **TABLIER DÉJÀ REMIS !**
-                        - **Bénéficiaire :** {t_nom}
-                        - **Remis le :** {t_date_r}
-                        """)
-                    else:
-                        st.success("✅ **TICKET AUTHENTIQUE - EN ATTENTE DE REMISE**")
-                        st.write(f"**Étudiant(e) :** {t_nom}")
-                        
-                        if float(t_reste) > 0:
-                            st.warning(f"⚠️ **ATTENTION CAISSE :** Reste à régler : **{t_reste} DH** avant remise.")
-                        else:
-                            st.info("💰 Paiement complet déjà effectué (Reste: 0 DH).")
-                            
-                        if t_type == "Standard":
-                            st.markdown(f"### 🥼 Taille à donner : **{t_taille}**")
-                        else:
-                            st.markdown("### 🥼 Mesures Spécifiques du Tailleur :")
-                            st.write(f"- Épaules : **{t_ep} cm** | Manche : **{t_ma} cm** | Poitrine : **{t_po} cm** | Longueur : **{t_lo} cm**")
-                            
-                        st.session_state["ticket_a_valider"] = t_id
+    if "verified_ticket" not in st.session_state:
+        st.session_state["verified_ticket"] = None
 
-    # Validation finale
-    if "ticket_a_valider" in st.session_state and st.session_state["ticket_a_valider"] == s_id:
+    v1, v2, v3 = st.columns([2, 2, 1])
+    with v1:
+        s_id = st.text_input("N° Ticket (ex: S1-001 ou S2-001) :").strip().upper()
+    with v2:
+        s_code = st.text_input("Code Sécurité Reçu (ex: 8F2A) :").strip().upper()
+    with v3:
+        st.write("")
+        st.write("")
+        if st.button("Vérifier le Ticket", type="secondary"):
+            if not s_id or not s_code:
+                st.warning("Remplissez le numéro et le code.")
+                st.session_state["verified_ticket"] = None
+            else:
+                conn = get_connection()
+                c = conn.cursor()
+                c.execute("SELECT * FROM tabliers WHERE ticket_id = %s", (s_id,))
+                row = c.fetchone()
+                c.close()
+                conn.close()
+                
+                if not row:
+                    st.error("❌ Ticket introuvable dans la base de données !")
+                    st.session_state["verified_ticket"] = None
+                else:
+                    (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r) = row
+                    info_cle = t_taille if t_type == "Standard" else "SUR-MESURE"
+                    
+                    if not verify_code(t_id, t_nom, info_cle, s_code):
+                        st.error("🚨 ALERTE : Le code ne correspond pas à ce ticket ou nom !")
+                        st.session_state["verified_ticket"] = None
+                    else:
+                        st.session_state["verified_ticket"] = row
+
+    # --- TRAITEMENT DU TICKET APRÈS VALIDATION DU CODE ---
+    if st.session_state["verified_ticket"]:
+        (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r) = st.session_state["verified_ticket"]
+        
         st.markdown("---")
-        if st.button("📦 Confirmer la Remise Définitive du Tablier", type="primary"):
-            conn = get_connection()
-            c = conn.cursor()
-            date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            c.execute("UPDATE tabliers SET statut = 'Confirmé', date_remise = %s, reste = 0 WHERE ticket_id = %s", (date_now, s_id))
-            conn.commit()
-            c.close()
-            conn.close()
-            st.balloons()
-            st.success(f"Tablier {s_id} marqué comme REMIS (Reste soldé).")
-            del st.session_state["ticket_a_valider"]
+        st.success(f"✅ **Ticket Authentifié :** `{t_id}` | **Étudiant :** `{t_nom}`")
+        
+        if float(t_reste) > 0:
+            st.warning(f"⚠️ **ATTENTION CAISSE :** Reste à régler : **{t_reste} DH** avant validation.")
+        else:
+            st.info("💰 Solde à jour (0 DH restant).")
+
+        # Cas 1 : Sur-mesure (Salle 2) -> Saisie des mesures tailleur
+        if t_type == "Sur-mesure":
+            if t_statut == "Confirmé":
+                st.warning(f"⚠️ Mesures déjà enregistrées et tablier confirmé le {t_date_r}.")
+                st.write(f"Mesures actuelles : Épaules: **{t_ep} cm**, Manche: **{t_ma} cm**, Poitrine: **{t_po} cm**, Longueur: **{t_lo} cm**")
+            
+            st.markdown("### 📏 Saisie des Mesures Tailleur (Salle 2)")
+            c_m1, c_m2 = st.columns(2)
+            with c_m1:
+                in_ep = st.text_input("Largeur des épaules (cm) :", value=t_ep or "").strip()
+                in_po = st.text_input("Tour de Poitrine (cm) :", value=t_po or "").strip()
+            with c_m2:
+                in_ma = st.text_input("Longueur Manche (cm) :", value=t_ma or "").strip()
+                in_lo = st.text_input("Longueur totale (cm) :", value=t_lo or "").strip()
+
+            if st.button("💾 Enregistrer les Mesures & Confirmer la Remise", type="primary"):
+                if not (in_ep and in_ma and in_po and in_lo):
+                    st.error("Veuillez renseigner toutes les 4 mesures avant de confirmer.")
+                else:
+                    conn = get_connection()
+                    c = conn.cursor()
+                    date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    c.execute('''
+                        UPDATE tabliers 
+                        SET epaules = %s, manche = %s, poitrine = %s, longueur = %s, statut = 'Confirmé', date_remise = %s, reste = 0 
+                        WHERE ticket_id = %s
+                    ''', (in_ep, in_ma, in_po, in_lo, date_now, t_id))
+                    conn.commit()
+                    c.close()
+                    conn.close()
+                    st.balloons()
+                    st.success(f" Mesures enregistrées et tablier {t_id} marqué comme CONFIRMÉ !")
+                    st.session_state["verified_ticket"] = None
+
+        # Cas 2 : Standard (Salle 1)
+        else:
+            if t_statut == "Confirmé":
+                st.info(f"ℹ️ Tablier Standard déjà validé et remis automatiquement en Salle 1 le {t_date_r} (Taille : **{t_taille}**).")
+            else:
+                st.markdown(f"### 🥼 Taille à remettre : **{t_taille}**")
+                if st.button("📦 Confirmer la Remise Définitive", type="primary"):
+                    conn = get_connection()
+                    c = conn.cursor()
+                    date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    c.execute("UPDATE tabliers SET statut = 'Confirmé', date_remise = %s, reste = 0 WHERE ticket_id = %s", (date_now, t_id))
+                    conn.commit()
+                    c.close()
+                    conn.close()
+                    st.balloons()
+                    st.success(f"Tablier {t_id} marqué comme REMIS.")
+                    st.session_state["verified_ticket"] = None
 
 # ================= ONGLET 3 : REGISTRE & GESTION PRÉSIDENT =================
 with onglet3:
@@ -257,7 +303,7 @@ with onglet3:
         
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Tabliers", total)
-        m2.metric("Tabliers Remis", f"{confirmes} / {total}")
+        m2.metric("Tabliers Confirmés / Remis", f"{confirmes} / {total}")
         m3.metric("Reste total à encaisser", f"{restes_dus:.0f} DH")
         
         df_display = df[[
