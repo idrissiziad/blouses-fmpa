@@ -1,21 +1,29 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+import psycopg2
 import hmac
 import hashlib
 from datetime import datetime
 
-# ================= CONFIGURATION =================
-APP_PASSWORD = "BDE_BLOUSES_2026"  # Mot de passe opérateur
-SECRET_SALT = "CLE_SECRET_SECURITE_TABLIERS_MAROC"
-DB_FILE = "blouses_database.db"
-# =================================================
+# ================= CONFIGURATION & SECRETS =================
+DATABASE_URL = st.secrets.get("DATABASE_URL", "")
+SECRET_SALT = st.secrets.get("SECRET_SALT", "CLE_SECRET_SECURITE_TABLIERS_MAROC")
+OPERATOR_PASSWORD = st.secrets.get("OPERATOR_PASSWORD", "BDE_STAFF_2026")
+PRESIDENT_PASSWORD = st.secrets.get("PRESIDENT_PASSWORD", "PRESIDENT_ADMIN_2026")
+# ===========================================================
 
 st.set_page_config(page_title="Gestion Tabliers & Mesures", page_icon="🥼", layout="wide")
 
-# Initialisation de la base conforme à votre feuille Excel
+def get_connection():
+    """Crée une connexion sécurisée vers Supabase (PostgreSQL)."""
+    return psycopg2.connect(DATABASE_URL)
+
+# Initialisation de la table PostgreSQL dans Supabase
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    if not DATABASE_URL:
+        st.error("DATABASE_URL non configurée dans les Secrets Streamlit.")
+        st.stop()
+    conn = get_connection()
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS tabliers (
@@ -29,13 +37,14 @@ def init_db():
             poitrine TEXT,
             longueur TEXT,
             paiement TEXT,
-            reste REAL,
+            reste NUMERIC,
             code_secu TEXT,
             statut TEXT,
             date_remise TEXT
         )
     ''')
     conn.commit()
+    c.close()
     conn.close()
 
 init_db()
@@ -50,20 +59,37 @@ def verify_code(ticket_id: str, nom: str, info_taille: str, code_saisi: str) -> 
     expected = generate_code(ticket_id, nom, info_taille)
     return hmac.compare_digest(expected, code_saisi.strip().upper())
 
-# --- VÉRIFICATION MOT DE PASSE ---
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
+# --- GESTION DES RÔLES & AUTHENTIFICATION ---
+if "user_role" not in st.session_state:
+    st.session_state["user_role"] = None
 
-if not st.session_state["authenticated"]:
+if not st.session_state["user_role"]:
     st.title("🔒 Accès Sécurisé - Gestion des Tabliers")
-    pwd = st.text_input("Entrez le mot de passe BDE :", type="password")
+    pwd = st.text_input("Entrez votre mot de passe d'accès :", type="password")
+    
     if st.button("Se connecter", type="primary"):
-        if pwd == APP_PASSWORD:
-            st.session_state["authenticated"] = True
+        if pwd == PRESIDENT_PASSWORD:
+            st.session_state["user_role"] = "PRESIDENT"
+            st.rerun()
+        elif pwd == OPERATOR_PASSWORD:
+            st.session_state["user_role"] = "OPERATOR"
             st.rerun()
         else:
             st.error("Mot de passe incorrect.")
     st.stop()
+
+# --- SIDEBAR (RÔLE & DÉCONNEXION) ---
+with st.sidebar:
+    if st.session_state["user_role"] == "PRESIDENT":
+        st.success("👑 **Session : PRÉSIDENT (Admin)**")
+        st.caption("Droits complets : Saisie, Remise, Modification & Réinitialisation.")
+    else:
+        st.info("👤 **Session : Opérateur BDE**")
+        st.caption("Droits restreints : Saisie & Remise autorisées. Modifications bloquées.")
+        
+    if st.button("Se déconnecter"):
+        st.session_state["user_role"] = None
+        st.rerun()
 
 # --- APPLICATION ---
 st.title("🥼 Gestion, Mesures Tailleur & Distribution")
@@ -84,7 +110,6 @@ with onglet1:
         mode = st.radio("Circuit :", ["Salle 1 : Taille Standard (Express)", "Salle 2 : Prise de Mesure Tailleur (Sur-mesure)"])
         nom_prenom = st.text_input("Nom et Prénom :").strip().title()
         
-        # Gestion financière (identique à votre feuille)
         c_p1, c_p2 = st.columns(2)
         with c_p1:
             paiement = st.text_input("Paiement versé :", value="140 cash")
@@ -121,10 +146,10 @@ with onglet1:
         elif type_cmd == "Sur-mesure" and not (epaules and manche and poitrine and longueur):
             st.warning("Veuillez renseigner toutes les mesures du tailleur.")
         else:
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_connection()
             c = conn.cursor()
             prefix = "S1" if type_cmd == "Standard" else "S2"
-            c.execute("SELECT COUNT(*) FROM tabliers WHERE ticket_id LIKE ?", (f"{prefix}%",))
+            c.execute("SELECT COUNT(*) FROM tabliers WHERE ticket_id LIKE %s", (f"{prefix}%",))
             num = c.fetchone()[0] + 1
             ticket_id = f"{prefix}-{num:03d}"
             
@@ -132,9 +157,10 @@ with onglet1:
             date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             c.execute('''
-                INSERT INTO tabliers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tabliers VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (ticket_id, date_now, nom_prenom, type_cmd, taille_standard, epaules, manche, poitrine, longueur, paiement, reste, code_secu, "Non Confirmé", "En attente"))
             conn.commit()
+            c.close()
             conn.close()
             
             st.success(f"Commande validée pour {nom_prenom} !")
@@ -163,10 +189,11 @@ with onglet2:
         if not s_id or not s_code:
             st.warning("Veuillez entrer le numéro de ticket ET le code.")
         else:
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_connection()
             c = conn.cursor()
-            c.execute("SELECT * FROM tabliers WHERE ticket_id = ?", (s_id,))
+            c.execute("SELECT * FROM tabliers WHERE ticket_id = %s", (s_id,))
             row = c.fetchone()
+            c.close()
             conn.close()
             
             if not row:
@@ -177,7 +204,7 @@ with onglet2:
                 info_cle = t_taille if t_type == "Standard" else f"{t_ep}-{t_ma}-{t_po}-{t_lo}"
                 
                 if not verify_code(t_id, t_nom, info_cle, s_code):
-                    st.error("🚨 ALERTE FALSIFICATION : Le code ne correspond pas à ce ticket ou le nom/la taille a été falsifié sur le papier !")
+                    st.error("🚨 ALERTE FALSIFICATION : Le code ne correspond pas à ce ticket ou le nom/la taille a été falsifié !")
                 else:
                     if t_statut == "Confirmé":
                         st.error(f"""
@@ -189,47 +216,42 @@ with onglet2:
                         st.success("✅ **TICKET AUTHENTIQUE - EN ATTENTE DE REMISE**")
                         st.write(f"**Étudiant(e) :** {t_nom}")
                         
-                        # ALERTE RESTE À PAYER
                         if float(t_reste) > 0:
-                            st.warning(f"⚠️ **ATTENTION CAISSE :** Cet étudiant doit encore régler un reste de **{t_reste} DH** avant de recevoir son tablier !")
+                            st.warning(f"⚠️ **ATTENTION CAISSE :** Reste à régler : **{t_reste} DH** avant remise.")
                         else:
                             st.info("💰 Paiement complet déjà effectué (Reste: 0 DH).")
                             
-                        # AFFICHAGE DE LA TAILLE / MESURES
                         if t_type == "Standard":
                             st.markdown(f"### 🥼 Taille à donner : **{t_taille}**")
                         else:
                             st.markdown("### 🥼 Mesures Spécifiques du Tailleur :")
-                            st.write(f"- Épaules : **{t_ep} cm**")
-                            st.write(f"- Longueur Manche : **{t_ma} cm**")
-                            st.write(f"- Tour de Poitrine : **{t_po} cm**")
-                            st.write(f"- Longueur Totale : **{t_lo} cm**")
+                            st.write(f"- Épaules : **{t_ep} cm** | Manche : **{t_ma} cm** | Poitrine : **{t_po} cm** | Longueur : **{t_lo} cm**")
                             
                         st.session_state["ticket_a_valider"] = t_id
 
-    # Validation finale de la remise
+    # Validation finale
     if "ticket_a_valider" in st.session_state and st.session_state["ticket_a_valider"] == s_id:
         st.markdown("---")
         if st.button("📦 Confirmer la Remise Définitive du Tablier", type="primary"):
-            conn = sqlite3.connect(DB_FILE)
+            conn = get_connection()
             c = conn.cursor()
             date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            c.execute("UPDATE tabliers SET statut = 'Confirmé', date_remise = ?, reste = 0 WHERE ticket_id = ?", (date_now, s_id))
+            c.execute("UPDATE tabliers SET statut = 'Confirmé', date_remise = %s, reste = 0 WHERE ticket_id = %s", (date_now, s_id))
             conn.commit()
+            c.close()
             conn.close()
             st.balloons()
-            st.success(f"Le tablier pour {s_id} est marqué comme REMIS (Reste soldé).")
+            st.success(f"Tablier {s_id} marqué comme REMIS (Reste soldé).")
             del st.session_state["ticket_a_valider"]
 
-# ================= ONGLET 3 : TABLEAU EXACT DU REGISTRE =================
+# ================= ONGLET 3 : REGISTRE & GESTION PRÉSIDENT =================
 with onglet3:
     st.subheader("Registre Conforme à votre Feuille de Suivi")
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM tabliers ORDER BY date_creation DESC", conn)
     conn.close()
     
     if not df.empty:
-        # Métriques
         total = len(df)
         confirmes = len(df[df["statut"] == "Confirmé"])
         restes_dus = df[df["reste"] > 0]["reste"].sum()
@@ -239,7 +261,6 @@ with onglet3:
         m2.metric("Tabliers Remis", f"{confirmes} / {total}")
         m3.metric("Reste total à encaisser", f"{restes_dus:.0f} DH")
         
-        # Mise en forme pour correspondre exactement à votre tableau
         df_display = df[[
             "ticket_id", "nom_prenom", "paiement", "reste", 
             "taille_standard", "epaules", "manche", "poitrine", "longueur", "statut", "date_remise"
@@ -255,13 +276,55 @@ with onglet3:
                 return 'background-color: #d4edda; color: #155724; font-weight: bold;'
             return 'background-color: #fff3cd; color: #856404;'
 
-        # Compatibilité Pandas < 2.1 (applymap) et Pandas >= 2.1 (map)
         styler = df_display.style
         style_method = getattr(styler, "map", None) or getattr(styler, "applymap")
-        
         st.dataframe(style_method(highlight_status, subset=['Statut']), use_container_width=True)
         
         csv_data = df_display.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Télécharger le tableau (Excel/CSV)", data=csv_data, file_name="tabliers_commandes.csv", mime="text/csv")
     else:
         st.info("Aucune commande enregistrée.")
+
+    # ================= CONTRÔLE STRICT RÉSERVÉ AU PRÉSIDENT =================
+    st.markdown("---")
+    if st.session_state["user_role"] == "PRESIDENT":
+        with st.expander("👑 Administration Président (Modification & Suppression)"):
+            st.warning("⚠️ Seul le Président peut modifier ou purger les enregistrements.")
+            
+            tab_del, tab_reset = st.tabs(["Supprimer un Ticket", "Réinitialiser Tout le Registre"])
+            
+            with tab_del:
+                c_del1, c_del2 = st.columns([3, 1])
+                with c_del1:
+                    t_del = st.text_input("N° Ticket à supprimer (ex: S1-002) :").strip().upper()
+                with c_del2:
+                    st.write("")
+                    st.write("")
+                    if st.button("Supprimer", type="secondary"):
+                        if t_del:
+                            conn = get_connection()
+                            c = conn.cursor()
+                            c.execute("DELETE FROM tabliers WHERE ticket_id = %s", (t_del,))
+                            conn.commit()
+                            c.close()
+                            conn.close()
+                            st.success(f"Ticket {t_del} supprimé de Supabase.")
+                            st.rerun()
+            
+            with tab_reset:
+                st.error("Cette opération supprime toutes les données dans Supabase.")
+                confirm_wipe = st.checkbox("Je confirme vouloir purger complètement le registre.")
+                if st.button("🗑️ Vider définitivement la base", type="primary"):
+                    if confirm_wipe:
+                        conn = get_connection()
+                        c = conn.cursor()
+                        c.execute("TRUNCATE TABLE tabliers")
+                        conn.commit()
+                        c.close()
+                        conn.close()
+                        st.success("Toutes les données ont été effacées.")
+                        st.rerun()
+                    else:
+                        st.warning("Veuillez d'abord cocher la case de confirmation.")
+    else:
+        st.caption("🔒 *Les fonctionnalités de suppression et modification du registre sont strictement réservées au Président.*")
