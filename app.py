@@ -255,7 +255,11 @@ with onglet3:
                 return 'background-color: #d4edda; color: #155724; font-weight: bold;'
             return 'background-color: #fff3cd; color: #856404;'
 
-        st.dataframe(df_display.style.applymap(highlight_status, subset=['Statut']), use_container_width=True)
+        # Compatibilité Pandas < 2.1 (applymap) et Pandas >= 2.1 (map)
+        styler = df_display.style
+        style_method = getattr(styler, "map", None) or getattr(styler, "applymap")
+        
+        st.dataframe(style_method(highlight_status, subset=['Statut']), use_container_width=True)
         
         csv_data = df_display.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Télécharger le tableau (Excel/CSV)", data=csv_data, file_name="tabliers_commandes.csv", mime="text/csv")
