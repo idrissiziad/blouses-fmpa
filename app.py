@@ -8,8 +8,9 @@ from datetime import datetime
 # ================= CONFIGURATION & SECRETS =================
 DATABASE_URL = st.secrets.get("DATABASE_URL", "")
 SECRET_SALT = st.secrets.get("SECRET_SALT", "CLE_SECRET_SECURITE_TABLIERS_MAROC")
-OPERATOR_PASSWORD = st.secrets.get("OPERATOR_PASSWORD", "")
 PRESIDENT_PASSWORD = st.secrets.get("PRESIDENT_PASSWORD", "")
+BDE_ACCOUNTS = st.secrets.get("bde_accounts", {})
+OPERATOR_PASSWORD = st.secrets.get("OPERATOR_PASSWORD", "")  # Rétrocompatibilité
 # ===========================================================
 
 st.set_page_config(page_title="Gestion Tabliers & Mesures", page_icon="🥼", layout="wide")
@@ -18,7 +19,7 @@ def get_connection():
     """Crée une connexion sécurisée vers Supabase (PostgreSQL)."""
     return psycopg2.connect(DATABASE_URL)
 
-# Initialisation de la table PostgreSQL dans Supabase
+# Initialisation et migration de la table PostgreSQL dans Supabase
 def init_db():
     if not DATABASE_URL:
         st.error("DATABASE_URL non configurée dans les Secrets Streamlit.")
@@ -40,9 +41,14 @@ def init_db():
             reste NUMERIC,
             code_secu TEXT,
             statut TEXT,
-            date_remise TEXT
+            date_remise TEXT,
+            cree_par TEXT,
+            valide_par TEXT
         )
     ''')
+    # Migration automatique non-destructive si la table existait déjà
+    c.execute("ALTER TABLE tabliers ADD COLUMN IF NOT EXISTS cree_par TEXT;")
+    c.execute("ALTER TABLE tabliers ADD COLUMN IF NOT EXISTS valide_par TEXT;")
     conn.commit()
     c.close()
     conn.close()
@@ -58,40 +64,61 @@ def verify_code(ticket_id: str, nom: str, info_taille: str, code_saisi: str) -> 
     expected = generate_code(ticket_id, nom, info_taille)
     return hmac.compare_digest(expected, code_saisi.strip().upper())
 
-# --- GESTION DES RÔLES & AUTHENTIFICATION ---
+# --- GESTION DES RÔLES & AUTHENTIFICATION NOM + MOT DE PASSE ---
 if "user_role" not in st.session_state:
     st.session_state["user_role"] = None
+if "user_name" not in st.session_state:
+    st.session_state["user_name"] = None
 
 if not st.session_state["user_role"]:
-    st.title("🔒 Accès Sécurisé - Gestion des Tabliers")
-    pwd = st.text_input("Entrez votre mot de passe d'accès :", type="password")
-    
-    if st.button("Se connecter", type="primary"):
-        if pwd == PRESIDENT_PASSWORD:
-            st.session_state["user_role"] = "PRESIDENT"
-            st.rerun()
-        elif pwd == OPERATOR_PASSWORD:
-            st.session_state["user_role"] = "OPERATOR"
-            st.rerun()
-        else:
-            st.error("Mot de passe incorrect.")
+    st.title("🔒 Connexion BDE - Gestion des Tabliers")
+    col_auth, _ = st.columns([1, 1])
+    with col_auth:
+        login_nom = st.text_input("Identifiant / Nom BDE :").strip()
+        pwd = st.text_input("Mot de passe :", type="password")
+        
+        if st.button("Se connecter", type="primary"):
+            if not login_nom or not pwd:
+                st.warning("Veuillez saisir votre Nom BDE et votre Mot de passe.")
+            elif pwd == PRESIDENT_PASSWORD:
+                st.session_state["user_role"] = "PRESIDENT"
+                st.session_state["user_name"] = login_nom if login_nom.lower() != "president" else "Président"
+                st.rerun()
+            else:
+                # Vérification insensible à la casse dans BDE_ACCOUNTS
+                accounts_map = {str(k).strip().lower(): (str(k), str(v)) for k, v in BDE_ACCOUNTS.items()}
+                nom_key = login_nom.lower()
+                
+                if nom_key in accounts_map and accounts_map[nom_key][1] == pwd:
+                    st.session_state["user_role"] = "OPERATOR"
+                    st.session_state["user_name"] = accounts_map[nom_key][0]
+                    st.rerun()
+                elif OPERATOR_PASSWORD and pwd == OPERATOR_PASSWORD:
+                    # Repli si l'ancien mot de passe unique opérateur est utilisé
+                    st.session_state["user_role"] = "OPERATOR"
+                    st.session_state["user_name"] = login_nom
+                    st.rerun()
+                else:
+                    st.error("Identifiant ou mot de passe incorrect.")
     st.stop()
 
-# --- SIDEBAR (RÔLE & DÉCONNEXION) ---
+# --- SIDEBAR (UTILISATEUR CONNECTÉ & DÉCONNEXION) ---
 with st.sidebar:
+    nom_connecte = st.session_state["user_name"]
     if st.session_state["user_role"] == "PRESIDENT":
-        st.success("👑 **Session : PRÉSIDENT (Admin)**")
+        st.success(f"👑 **Session : {nom_connecte} (Président)**")
         st.caption("Droits complets : Saisie, Remise, Modification & Réinitialisation.")
     else:
-        st.info("👤 **Session : Opérateur BDE**")
-        st.caption("Droits restreints : Saisie & Remise autorisées. Modifications bloquées.")
+        st.info(f"👤 **Session : {nom_connecte} (Opérateur BDE)**")
+        st.caption("Droits : Saisie & Remise. Vos actions sont enregistrées sous votre nom.")
         
     if st.button("Se déconnecter"):
         st.session_state["user_role"] = None
+        st.session_state["user_name"] = None
         st.session_state.pop("verified_ticket", None)
         st.rerun()
 
-# --- APPLICATION ---
+# --- APPLICATION PRINCIPALE ---
 st.title("🥼 Gestion, Mesures Tailleur & Distribution")
 
 onglet1, onglet2, onglet3 = st.tabs([
@@ -111,7 +138,7 @@ with onglet1:
             "Salle 1 : Taille Standard (Express - Remise Immédiate)", 
             "Salle 2 : Sur-Mesure Tailleur (Mesures prises en Salle 2)"
         ])
-        nom_prenom = st.text_input("Nom et Prénom :").strip().title()
+        nom_prenom = st.text_input("Nom et Prénom de l'étudiant :").strip().title()
         
         c_p1, c_p2 = st.columns(2)
         with c_p1:
@@ -133,7 +160,7 @@ with onglet1:
             st.success("⚡ **Remise immédiate :** Ce tablier sera automatiquement marqué comme **Confirmé / Remis**.")
         else:
             st.markdown("#### 📏 Prise de Mesure Tailleur (Salle 2)")
-            st.info("ℹ️ Les mesures tailleur (épaules, manche, poitrine, longueur) seront saisies dans l'**Onglet 2** une fois le ticket et code de sécurité scannés/vérifiés par le tailleur.")
+            st.info("ℹ️ Les mesures tailleur seront saisies dans l'**Onglet 2** une fois le ticket vérifié.")
             type_cmd = "Sur-mesure"
             taille_standard = "SUR-MESURE"
             epaules, manche, poitrine, longueur = "", "", "", ""
@@ -141,7 +168,7 @@ with onglet1:
 
     if st.button("Enregistrer et Générer le Reçu", type="primary"):
         if not nom_prenom:
-            st.warning("Veuillez renseigner le Nom et Prénom.")
+            st.warning("Veuillez renseigner le Nom et Prénom de l'étudiant.")
         else:
             conn = get_connection()
             c = conn.cursor()
@@ -152,26 +179,37 @@ with onglet1:
             
             code_secu = generate_code(ticket_id, nom_prenom, detail_cle)
             date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            operateur_actuel = st.session_state["user_name"]
             
-            # Salle 1 : Confirmation automatique immédiate
+            # En Salle 1, c'est directement validé par cet opérateur
             if type_cmd == "Standard":
                 statut_init = "Confirmé"
                 date_remise_init = date_now
+                valide_par_init = operateur_actuel
             else:
                 statut_init = "Non Confirmé"
                 date_remise_init = "En attente mesures"
+                valide_par_init = None
             
             c.execute('''
-                INSERT INTO tabliers VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (ticket_id, date_now, nom_prenom, type_cmd, taille_standard, epaules, manche, poitrine, longueur, paiement, reste, code_secu, statut_init, date_remise_init))
+                INSERT INTO tabliers (
+                    ticket_id, date_creation, nom_prenom, type_commande, taille_standard,
+                    epaules, manche, poitrine, longueur, paiement, reste, code_secu,
+                    statut, date_remise, cree_par, valide_par
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (
+                ticket_id, date_now, nom_prenom, type_cmd, taille_standard, 
+                epaules, manche, poitrine, longueur, paiement, reste, code_secu, 
+                statut_init, date_remise_init, operateur_actuel, valide_par_init
+            ))
             conn.commit()
             c.close()
             conn.close()
             
             if type_cmd == "Standard":
-                st.success(f" Tablier remis et commande validée automatiquement pour {nom_prenom} !")
+                st.success(f" Tablier remis et validé par **{operateur_actuel}** pour {nom_prenom} !")
             else:
-                st.success(f" Ticket généré pour {nom_prenom} ! L'étudiant peut se présenter au tailleur.")
+                st.success(f" Ticket généré par **{operateur_actuel}** pour {nom_prenom} !")
 
             st.markdown(f"""
             ---
@@ -180,7 +218,8 @@ with onglet1:
             - **Nom :** `{nom_prenom}`
             - **Circuit :** `{"Salle 1 - Standard (" + taille_standard + ")" if type_cmd == "Standard" else "Salle 2 - Sur-Mesure"}`
             - **Reste à payer :** `{reste} DH`
-            - **Code de Sécurité Anti-fraude :** `{code_secu}`
+            - **Code de Sécurité :** `{code_secu}`
+            - **Enregistré par :** `{operateur_actuel}`
             - **Statut :** `{statut_init}`
             ---
             """)
@@ -207,7 +246,12 @@ with onglet2:
             else:
                 conn = get_connection()
                 c = conn.cursor()
-                c.execute("SELECT * FROM tabliers WHERE ticket_id = %s", (s_id,))
+                c.execute("""
+                    SELECT ticket_id, date_creation, nom_prenom, type_commande, taille_standard, 
+                           epaules, manche, poitrine, longueur, paiement, reste, code_secu, 
+                           statut, date_remise, cree_par, valide_par 
+                    FROM tabliers WHERE ticket_id = %s
+                """, (s_id,))
                 row = c.fetchone()
                 c.close()
                 conn.close()
@@ -216,7 +260,7 @@ with onglet2:
                     st.error("❌ Ticket introuvable dans la base de données !")
                     st.session_state["verified_ticket"] = None
                 else:
-                    (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r) = row
+                    (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r, t_cree, t_valide) = row
                     info_cle = t_taille if t_type == "Standard" else "SUR-MESURE"
                     
                     if not verify_code(t_id, t_nom, info_cle, s_code):
@@ -227,10 +271,10 @@ with onglet2:
 
     # --- TRAITEMENT DU TICKET APRÈS VALIDATION DU CODE ---
     if st.session_state["verified_ticket"]:
-        (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r) = st.session_state["verified_ticket"]
+        (t_id, t_date_c, t_nom, t_type, t_taille, t_ep, t_ma, t_po, t_lo, t_paie, t_reste, t_code, t_statut, t_date_r, t_cree, t_valide) = st.session_state["verified_ticket"]
         
         st.markdown("---")
-        st.success(f"✅ **Ticket Authentifié :** `{t_id}` | **Étudiant :** `{t_nom}`")
+        st.success(f"✅ **Ticket Authentifié :** `{t_id}` | **Étudiant :** `{t_nom}` | **Créé par :** `{t_cree or 'Inconnu'}`")
         
         if float(t_reste) > 0:
             st.warning(f"⚠️ **ATTENTION CAISSE :** Reste à régler : **{t_reste} DH** avant validation.")
@@ -240,7 +284,7 @@ with onglet2:
         # Cas 1 : Sur-mesure (Salle 2) -> Saisie des mesures tailleur
         if t_type == "Sur-mesure":
             if t_statut == "Confirmé":
-                st.warning(f"⚠️ Mesures déjà enregistrées et tablier confirmé le {t_date_r}.")
+                st.warning(f"⚠️ Mesures déjà validées par **{t_valide or 'Inconnu'}** le {t_date_r}.")
                 st.write(f"Mesures actuelles : Épaules: **{t_ep} cm**, Manche: **{t_ma} cm**, Poitrine: **{t_po} cm**, Longueur: **{t_lo} cm**")
             
             st.markdown("### 📏 Saisie des Mesures Tailleur (Salle 2)")
@@ -261,32 +305,36 @@ with onglet2:
                     date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     c.execute('''
                         UPDATE tabliers 
-                        SET epaules = %s, manche = %s, poitrine = %s, longueur = %s, statut = 'Confirmé', date_remise = %s, reste = 0 
+                        SET epaules = %s, manche = %s, poitrine = %s, longueur = %s, statut = 'Confirmé', date_remise = %s, reste = 0, valide_par = %s 
                         WHERE ticket_id = %s
-                    ''', (in_ep, in_ma, in_po, in_lo, date_now, t_id))
+                    ''', (in_ep, in_ma, in_po, in_lo, date_now, st.session_state["user_name"], t_id))
                     conn.commit()
                     c.close()
                     conn.close()
                     st.balloons()
-                    st.success(f" Mesures enregistrées et tablier {t_id} marqué comme CONFIRMÉ !")
+                    st.success(f"Mesures enregistrées et confirmées par {st.session_state['user_name']} !")
                     st.session_state["verified_ticket"] = None
 
         # Cas 2 : Standard (Salle 1)
         else:
             if t_statut == "Confirmé":
-                st.info(f"ℹ️ Tablier Standard déjà validé et remis automatiquement en Salle 1 le {t_date_r} (Taille : **{t_taille}**).")
+                st.info(f"ℹ️ Tablier Standard déjà validé et remis par **{t_valide or 'Inconnu'}** le {t_date_r} (Taille : **{t_taille}**).")
             else:
                 st.markdown(f"### 🥼 Taille à remettre : **{t_taille}**")
                 if st.button("📦 Confirmer la Remise Définitive", type="primary"):
                     conn = get_connection()
                     c = conn.cursor()
                     date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    c.execute("UPDATE tabliers SET statut = 'Confirmé', date_remise = %s, reste = 0 WHERE ticket_id = %s", (date_now, t_id))
+                    c.execute("""
+                        UPDATE tabliers 
+                        SET statut = 'Confirmé', date_remise = %s, reste = 0, valide_par = %s 
+                        WHERE ticket_id = %s
+                    """, (date_now, st.session_state["user_name"], t_id))
                     conn.commit()
                     c.close()
                     conn.close()
                     st.balloons()
-                    st.success(f"Tablier {t_id} marqué comme REMIS.")
+                    st.success(f"Tablier {t_id} marqué comme REMIS par {st.session_state['user_name']}.")
                     st.session_state["verified_ticket"] = None
 
 # ================= ONGLET 3 : REGISTRE & GESTION PRÉSIDENT =================
@@ -306,15 +354,30 @@ with onglet3:
         m2.metric("Tabliers Confirmés / Remis", f"{confirmes} / {total}")
         m3.metric("Reste total à encaisser", f"{restes_dus:.0f} DH")
         
-        df_display = df[[
+        cols_base = [
             "ticket_id", "nom_prenom", "paiement", "reste", 
-            "taille_standard", "epaules", "manche", "poitrine", "longueur", "statut", "date_remise"
-        ]].copy()
-        
-        df_display.columns = [
-            "Ticket", "Nom et Prénom", "Paiement", "Reste (DH)", 
-            "Taille Standard", "Largeur épaules", "MANCHE", "POITRINE", "Longueur", "Statut", "Date Remise"
+            "taille_standard", "epaules", "manche", "poitrine", "longueur", 
+            "statut", "date_remise", "cree_par", "valide_par"
         ]
+        available_cols = [col for col in cols_base if col in df.columns]
+        df_display = df[available_cols].copy()
+        
+        col_names_fr = {
+            "ticket_id": "Ticket",
+            "nom_prenom": "Nom et Prénom",
+            "paiement": "Paiement",
+            "reste": "Reste (DH)",
+            "taille_standard": "Taille Standard",
+            "epaules": "Largeur épaules",
+            "manche": "MANCHE",
+            "poitrine": "POITRINE",
+            "longueur": "Longueur",
+            "statut": "Statut",
+            "date_remise": "Date Remise",
+            "cree_par": "Enregistré par (BDE)",
+            "valide_par": "Validé par (BDE)"
+        }
+        df_display.rename(columns=col_names_fr, inplace=True)
         
         def highlight_status(val):
             if val == 'Confirmé':
