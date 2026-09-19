@@ -52,8 +52,7 @@ init_db()
 # Génération du code court HMAC pour le reçu papier
 def generate_code(ticket_id: str, nom: str, info_taille: str) -> str:
     data = f"{ticket_id}|{nom.upper()}|{info_taille}|{SECRET_SALT}"
-    sig = hmac.new(SECRET_SALT.encode(), data.encode(), hashlib.sha256).hexdigest()[:8].upper()
-    return f"{sig[:4]}-{sig[4:]}"
+    return hmac.new(SECRET_SALT.encode(), data.encode(), hashlib.sha256).hexdigest()[:4].upper()
 
 def verify_code(ticket_id: str, nom: str, info_taille: str, code_saisi: str) -> bool:
     expected = generate_code(ticket_id, nom, info_taille)
