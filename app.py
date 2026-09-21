@@ -64,6 +64,25 @@ def verify_code(ticket_id: str, nom: str, info_taille: str, code_saisi: str) -> 
     expected = generate_code(ticket_id, nom, info_taille)
     return hmac.compare_digest(expected, code_saisi.strip().upper())
 
+# Génération sécurisée du prochain numéro de ticket (évite les doublons et gère les suppressions)
+def get_next_ticket_id(c, prefix: str) -> str:
+    """Trouve le prochain numéro disponible basé sur le MAX existant."""
+    c.execute("""
+        SELECT COALESCE(MAX(CAST(SPLIT_PART(ticket_id, '-', 2) AS INTEGER)), 0) + 1
+        FROM tabliers
+        WHERE ticket_id ~ %s
+    """, (f"^{prefix}-[0-9]+$",))
+    row = c.fetchone()
+    num = row[0] if row and row[0] else 1
+    
+    # Sécurité anti-collision supplémentaire
+    while True:
+        candidate_id = f"{prefix}-{num:03d}"
+        c.execute("SELECT 1 FROM tabliers WHERE ticket_id = %s", (candidate_id,))
+        if not c.fetchone():
+            return candidate_id
+        num += 1
+
 # --- GESTION DES RÔLES & AUTHENTIFICATION NOM + MOT DE PASSE ---
 if "user_role" not in st.session_state:
     st.session_state["user_role"] = None
@@ -172,57 +191,63 @@ with onglet1:
         else:
             conn = get_connection()
             c = conn.cursor()
-            prefix = "S1" if type_cmd == "Standard" else "S2"
-            c.execute("SELECT COUNT(*) FROM tabliers WHERE ticket_id LIKE %s", (f"{prefix}%",))
-            num = c.fetchone()[0] + 1
-            ticket_id = f"{prefix}-{num:03d}"
-            
-            code_secu = generate_code(ticket_id, nom_prenom, detail_cle)
-            date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            operateur_actuel = st.session_state["user_name"]
-            
-            # En Salle 1, c'est directement validé par cet opérateur
-            if type_cmd == "Standard":
-                statut_init = "Confirmé"
-                date_remise_init = date_now
-                valide_par_init = operateur_actuel
-            else:
-                statut_init = "Non Confirmé"
-                date_remise_init = "En attente mesures"
-                valide_par_init = None
-            
-            c.execute('''
-                INSERT INTO tabliers (
-                    ticket_id, date_creation, nom_prenom, type_commande, taille_standard,
-                    epaules, manche, poitrine, longueur, paiement, reste, code_secu,
-                    statut, date_remise, cree_par, valide_par
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (
-                ticket_id, date_now, nom_prenom, type_cmd, taille_standard, 
-                epaules, manche, poitrine, longueur, paiement, reste, code_secu, 
-                statut_init, date_remise_init, operateur_actuel, valide_par_init
-            ))
-            conn.commit()
-            c.close()
-            conn.close()
-            
-            if type_cmd == "Standard":
-                st.success(f" Tablier remis et validé par **{operateur_actuel}** pour {nom_prenom} !")
-            else:
-                st.success(f" Ticket généré par **{operateur_actuel}** pour {nom_prenom} !")
+            try:
+                prefix = "S1" if type_cmd == "Standard" else "S2"
+                ticket_id = get_next_ticket_id(c, prefix)
+                
+                code_secu = generate_code(ticket_id, nom_prenom, detail_cle)
+                date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                operateur_actuel = st.session_state["user_name"]
+                
+                # En Salle 1, c'est directement validé par cet opérateur
+                if type_cmd == "Standard":
+                    statut_init = "Confirmé"
+                    date_remise_init = date_now
+                    valide_par_init = operateur_actuel
+                else:
+                    statut_init = "Non Confirmé"
+                    date_remise_init = "En attente mesures"
+                    valide_par_init = None
+                
+                c.execute('''
+                    INSERT INTO tabliers (
+                        ticket_id, date_creation, nom_prenom, type_commande, taille_standard,
+                        epaules, manche, poitrine, longueur, paiement, reste, code_secu,
+                        statut, date_remise, cree_par, valide_par
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ''', (
+                    ticket_id, date_now, nom_prenom, type_cmd, taille_standard, 
+                    epaules, manche, poitrine, longueur, paiement, reste, code_secu, 
+                    statut_init, date_remise_init, operateur_actuel, valide_par_init
+                ))
+                conn.commit()
+                
+                if type_cmd == "Standard":
+                    st.success(f"Tablier remis et validé par **{operateur_actuel}** pour {nom_prenom} !")
+                else:
+                    st.success(f"Ticket généré par **{operateur_actuel}** pour {nom_prenom} !")
 
-            st.markdown(f"""
-            ---
-            ### 🧾 INFORMATIONS DU REÇU PAPIER :
-            - **N° Ticket :** `{ticket_id}`
-            - **Nom :** `{nom_prenom}`
-            - **Circuit :** `{"Salle 1 - Standard (" + taille_standard + ")" if type_cmd == "Standard" else "Salle 2 - Sur-Mesure"}`
-            - **Reste à payer :** `{reste} DH`
-            - **Code de Sécurité :** `{code_secu}`
-            - **Enregistré par :** `{operateur_actuel}`
-            - **Statut :** `{statut_init}`
-            ---
-            """)
+                st.markdown(f"""
+                ---
+                ### 🧾 INFORMATIONS DU REÇU PAPIER :
+                - **N° Ticket :** `{ticket_id}`
+                - **Nom :** `{nom_prenom}`
+                - **Circuit :** `{"Salle 1 - Standard (" + taille_standard + ")" if type_cmd == "Standard" else "Salle 2 - Sur-Mesure"}`
+                - **Reste à payer :** `{reste} DH`
+                - **Code de Sécurité :** `{code_secu}`
+                - **Enregistré par :** `{operateur_actuel}`
+                - **Statut :** `{statut_init}`
+                ---
+                """)
+            except psycopg2.IntegrityError:
+                conn.rollback()
+                st.error("Un conflit de numéro de ticket est survenu. Veuillez cliquer à nouveau pour réessayer.")
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Une erreur est survenue : {e}")
+            finally:
+                c.close()
+                conn.close()
 
 # ================= ONGLET 2 : VÉRIFICATION & PRISE DE MESURES =================
 with onglet2:
